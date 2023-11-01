@@ -92,7 +92,7 @@ def build_val_dataset(opt, log, corrupt_type):
         val_dataset = imagenet.build_lmdb_dataset_val10k(opt, log)
         val_dataset = MixtureCorruptDatasetVal(opt, val_dataset) # subset 10k val + mixture
     else:
-        val_dataset = imagenet.build_lmdb_dataset_val10k(opt, log) # subset 10k val
+        val_dataset = imagenet.build_lmdb_dataset(opt, log,train=False) # subset 10k val
 
     # build partition
     if opt.partition is not None:

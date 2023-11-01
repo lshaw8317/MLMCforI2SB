@@ -113,8 +113,10 @@ class Diffusion():
         stack_bwd_traj = lambda z: torch.flip(torch.stack(z, dim=1), dims=(1,))
         return stack_bwd_traj(xs), stack_bwd_traj(pred_x0s)
     
-    def mysampler_fun(self,pred_x0_fn,x,step,prev_step,dW,ot_ode,mask,x1):
-        pred_x0 = pred_x0_fn(x, step)
+    def mysampler_fun(self,pred_x0_fn,x,step,prev_step,dW,ot_ode,mask,corrupt_img):
+        vec_step=torch.full((x.shape[0],), step, device=x.device, dtype=torch.long)
+        print(x.device,vec_step.device)
+        pred_x0 = pred_x0_fn(x, vec_step)
         assert prev_step < step
         std_n     = self.std_fwd[step]
         std_nprev = self.std_fwd[prev_step]
@@ -125,7 +127,7 @@ class Diffusion():
             x = x + var.sqrt() * dW
 
         if mask is not None:
-            xt_true = x1
+            xt_true = corrupt_img
             if not ot_ode:
                 _prev_step = torch.full((x.shape[0],), prev_step, device=self.device, dtype=torch.long)
                 std_sb = unsqueeze_xdim(self.std_sb[_prev_step], xdim=x1.shape[1:])
@@ -134,9 +136,10 @@ class Diffusion():
         return x
     
     @torch.no_grad()
-    def mlmcsample(self, finesteps, M, pred_x0_fn, x1,bs, mask=None, ot_ode=False, log_steps=None, verbose=True):
-        filler=tuple([1 for i in range(len(x1.shape[1:]))])        
-        xf = x1.repeat(bs,*filler).to(self.device)     
+    def mlmcsample(self, finesteps, M, pred_x0_fn, corrupt_img,bs, mask=None, ot_ode=False, log_steps=None, verbose=True):
+        filler=tuple([1 for i in range(len(corrupt_img.shape[1:]))])
+        corrupt_img=corrupt_img.detach().repeat(bs,*filler).to(self.device)
+        xf = corrupt_img.clone().detach().to(self.device)     
         xc = xf.clone().detach().to(self.device)
         dWc=torch.zeros_like(xc).to(self.device)
         assert len(finesteps)<len(self.betas) 
@@ -144,12 +147,12 @@ class Diffusion():
         fine_pair = zip(finesteps[1:], finesteps[:-1])
         counter=0
         for prev_step, step in fine_pair:
-            dWf=torch.randn_like(xf)
-            xf=self.sampler_fun(pred_x0_fn,xf,step,prev_step,dWf,ot_ode,mask,x1)
+            dWf=torch.randn_like(xf).to(self.device)
+            xf=self.mysampler_fun(pred_x0_fn,xf,step,prev_step,dWf,ot_ode,mask,corrupt_img)
             dWc+=dWf*torch.sqrt(torch.tensor([1./M]).to(self.device))
             counter+=1
             if counter==M:
-                xc=self.sampler_fun(pred_x0_fn,xc,step,prev_step,dWc,ot_ode,mask,x1)
+                xc=self.mysampler_fun(pred_x0_fn,xc,step,prev_step,dWc,ot_ode,mask,corrupt_img)
                 dWc*=0.
                 counter=0
             

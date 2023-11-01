@@ -49,18 +49,19 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
 
-def build_val_dataset(opt, log, corrupt_type):
+def build_dataset(opt, log, corrupt_type):
     if "sr4x" in corrupt_type:
         val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
     elif "inpaint" in corrupt_type:
         mask = corrupt_type.split("-")[1]
+        raise Exception('Not yet implemented.')
         val_dataset = imagenet.InpaintingVal10kSubset(opt, log, mask) # subset 10k val + mask
     elif corrupt_type == "mixture":
         from corruption.mixture import MixtureCorruptDatasetVal
-        val_dataset = imagenet.build_lmdb_dataset_val10k(opt, log)
+        val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False)
         val_dataset = MixtureCorruptDatasetVal(opt, val_dataset) # subset 10k val + mixture
     else:
-        val_dataset = imagenet.build_lmdb_dataset_val10k(opt, log) # subset 10k val
+        val_dataset = imagenet.build_lmdb_dataset(opt, log,train=False) # subset 10k val
 
     return val_dataset
 
@@ -91,16 +92,22 @@ def main(opt):
     # get (default) ckpt option
     ckpt_opt = ckpt_util.build_ckpt_option(opt, log, RESULT_DIR / opt.ckpt)
     corrupt_type = ckpt_opt.corrupt
-    
 
     # build corruption method
     corrupt_method = build_corruption(opt, log, corrupt_type=corrupt_type)
 
     # build imagenet val dataset
-    out = build_val_dataset(opt, log, corrupt_type)[0][None,...]
+    valdataset= build_dataset(opt, log, corrupt_type)
 
     # build runner
-    runner = Runner(ckpt_opt, log, save_opt=False)
+    sample_dir = RESULT_DIR / opt.ckpt / "{}{}".format(
+        datetime.datetime.now().strftime('%y%m%d_%H%M%S'),"_clip" if opt.clip_denoise else ""
+    )
+    os.makedirs(sample_dir, exist_ok=True)
+    mlmcoptions=edict(M=opt.M,N0=opt.N0,Lmin=opt.Lmin,Lmax=opt.Lmax,payoff=opt.payoff,
+                      accsplit=opt.accsplit,eval_dir=sample_dir,acc=opt.acc,batch_size=opt.batch_size)
+    
+    runner = Runner(ckpt_opt, log, mlmcoptions,save_opt=False)
 
     # handle use_fp16 for ema
     if opt.use_fp16:
@@ -108,22 +115,28 @@ def main(opt):
         runner.net.diffusion_model.convert_to_fp16()
         runner.ema = ExponentialMovingAverage(runner.net.parameters(), decay=0.99) # re-init ema with fp16 weight
 
-    corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
-
-    runner.Giles_plot(ckpt_opt, x1, mask=mask, cond=cond)
-
-    y = y.to(opt.device)
-
-    del runner
+    val_loader = DataLoader(valdataset,
+        batch_size=1, shuffle=False, pin_memory=True, num_workers=1, drop_last=False,
+    )
     
-    tu.save_image((out[0]+1)/2, "clean.png")
-    tu.save_image((corrupt_img+1)/2, opt.mlmc.eval_dir+"corrupt.png")
-    tu.save_image((x1+1)/2, opt.mlmc.eval_dir+"x1.png")
-    with open(os.path.join(opt.mlmc.eval_dir, "label.pt"), "wb") as fout:
-        torch.save(y,fout)
-    with open(os.path.join(opt.mlmc.eval_dir, "mask.pt"), "wb") as fout:
-        torch.save(mask,fout)
+    for it,out in enumerate(val_loader):
+        corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
 
+        #corrupt_img, x1, mask, cond, y=corrupt_img[0], x1[0], mask[0], cond[0], y[0]
+        runner.Giles_plot(opt.acc,ckpt_opt, corrupt_img.to('cpu'), mask=mask, cond=cond)
+
+        y = y.to(opt.device)
+
+        tu.save_image((out[0]+1)/2, "clean.png")
+        tu.save_image((corrupt_img+1)/2, opt.mlmc.eval_dir+"corrupt.png")
+        tu.save_image((x1+1)/2, opt.mlmc.eval_dir+"x1.png")
+        with open(os.path.join(opt.mlmc.eval_dir, "label.pt"), "wb") as fout:
+            torch.save(y,fout)
+        with open(os.path.join(opt.mlmc.eval_dir, "mask.pt"), "wb") as fout:
+            torch.save(mask,fout)
+        if it==0:
+            break
+    del runner
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed",           type=int,  default=0)
@@ -142,13 +155,6 @@ if __name__ == '__main__':
     parser.add_argument("--clip-denoise",   action="store_true",  default=False,          help="clamp predicted image to [-1,1] at each")
     parser.add_argument("--use-fp16",       action="store_true",            help="use fp16 network weight for faster sampling")
     
-    arg = parser.parse_args()
-    
-    opt = edict(
-        device="cuda",
-    )
-    opt.update(vars(arg))
-    
     #mlmc
     parser.add_argument("--M",     type=int,  default=2)
     parser.add_argument("--N0",           type=str,  default=100,        help="initial MLMC samples")
@@ -156,18 +162,14 @@ if __name__ == '__main__':
     parser.add_argument("--Lmax",       type=int, default=11,          help="maximum level")
     parser.add_argument("--accsplit",       type=float, default=np.sqrt(.5),          help="bias-variance splitting")
     parser.add_argument("--acc",       type=list, default=[.1],          help="accuracies for MLMC")
+    parser.add_argument("--payoff",       type=str, default='mean',          help="payoff for MLMC")
 
     arg = parser.parse_args()
-    
-    sample_dir = RESULT_DIR / opt.ckpt / "{}{}".format(
-        datetime.datetime.now().strftime('%y%m%d_%H%M%S'),"_clip" if opt.clip_denoise else ""
+   
+    opt = edict(
+        device="cuda",
     )
-    os.makedirs(sample_dir, exist_ok=True)
-    
-    mlmcdict=edict(M=arg.M,N0=arg.N0,Lmin=arg.Lmin,Lmax=arg.Lmax,
-                   accsplit=arg.accsplit,eval_dir=sample_dir,acc=arg.acc)
-  
-    opt.update(mlmcdict)
+    opt.update(vars(arg))
 
     # one-time download: ADM checkpoint
     download_ckpt("data/")

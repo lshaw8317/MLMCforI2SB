@@ -84,7 +84,7 @@ def all_cat_cpu(opt, log, t):
     return torch.cat(gathered_t).detach().cpu()
 
 class Runner(object):
-    def __init__(self, opt, log, save_opt=True):
+    def __init__(self, opt, log,mlmcoptions=None, save_opt=True):
         super(Runner,self).__init__()
 
         # Save opt.
@@ -102,35 +102,36 @@ class Runner(object):
         noise_levels = torch.linspace(opt.t0, opt.T, opt.interval, device=opt.device) * opt.interval
         self.net = Image256Net(log, noise_levels=noise_levels, use_fp16=opt.use_fp16, cond=opt.cond_x1)
         self.ema = ExponentialMovingAverage(self.net.parameters(), decay=opt.ema)
-        
-        #MLMC params
-        self.M=opt.mlmc.M
-        self.Lmax=opt.mlmc.Lmax
-        self.Lmin=opt.mlmc.Lmin
-        self.accsplit=opt.mlmc.accsplit
-        self.N0=opt.mlmc.N0
-        self.eval_dir=opt.mlmc.eval_dir
-        
-        if opt.mlmc.payoff=='mean':
-            self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
-        elif opt.mlmc.payoff=='secondmoment':
-            self.payoff=lambda x: torch.clip((x+1)/2,0.,1.)**2 #[-1,1]->[0,1]
-        else:
-            print('opt payoff arg not recognised, Setting to mean payoff by default')
-            self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
-
+    
         if opt.load:
             checkpoint = torch.load(opt.load, map_location="cpu")
             self.net.load_state_dict(checkpoint['net'])
             log.info(f"[Net] Loaded network ckpt: {opt.load}!")
             self.ema.load_state_dict(checkpoint["ema"])
             log.info(f"[Ema] Loaded ema ckpt: {opt.load}!")
+        
+        if mlmcoptions:
+            #MLMC params
+            self.M=mlmcoptions.M
+            self.Lmax=mlmcoptions.Lmax
+            self.Lmin=mlmcoptions.Lmin
+            self.mlmc_batch_size=mlmcoptions.batch_size
+            self.accsplit=mlmcoptions.accsplit
+            self.N0=mlmcoptions.N0
+            self.eval_dir=mlmcoptions.eval_dir
+        
+            if mlmcoptions.payoff=='mean':
+                self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
+            elif mlmcoptions.payoff=='secondmoment':
+                self.payoff=lambda x: torch.clip((x+1)/2,0.,1.)**2 #[-1,1]->[0,1]
+            else:
+                print('mlmcoptions payoff arg not recognised, Setting to mean payoff by default')
+                self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
+                
+            self.net = torch.nn.DataParallel(self.net)
 
         self.net.to(opt.device)
         self.ema.to(opt.device)
-        
-        if opt.mlmc.mlmc:
-            self.net = torch.nn.DataParallel(self.net)
 
         self.log = log
 
@@ -291,8 +292,7 @@ class Runner(object):
 
         return xs, pred_x0
     
-    def mlmclooper(self, Nl, l ,M, opt, x1, mask=None, cond=None, clip_denoise=False, log_count=0, verbose=True):
-        torch.cuda.empty_cache()
+    def mlmclooper(self, Nl, l ,M, opt, corrupt_img, mask=None, cond=None, clip_denoise=False, log_count=0, verbose=True):
         # create discrete time steps that split [0, INTERVAL] into NFE sub-intervals.
         # e.g., if NFE=2 & INTERVAL=1000, then STEPS=[0, 500, 999] and 2 network
         # evaluations will be invoked, first from 999 to 500, then from 500 to 0.
@@ -300,35 +300,33 @@ class Runner(object):
         assert 0 < nfe < opt.interval == len(self.diffusion.betas)
         steps = util.space_indices(opt.interval, nfe+1)
 
+        assert cond==None
         # # create log steps
         # log_count = min(len(steps)-1, log_count)
         # log_steps = [steps[i] for i in util.space_indices(len(steps)-1, log_count)]
         # assert log_steps[0] == 0
         # self.log.info(f"[MLMC loop Sampling] steps={opt.interval}, {nfe=}, {log_steps=}!")
-
-        x1 = x1.to(opt.device)
-        if cond is not None: cond = cond.to(opt.device)
-        if mask is not None:
-            mask = mask.to(opt.device)
-            x1 = (1. - mask) * x1 + mask * torch.randn_like(x1)
-
+        
         with self.ema.average_parameters():
             self.net.eval()
 
             def pred_x0_fn(xt, step):
-                step = torch.full((xt.shape[0],), step, device=opt.device, dtype=torch.long)
                 out = self.net(xt, step, cond=cond)
-                return self.compute_pred_x0(step, xt, out, clip_denoise=clip_denoise)
+                std_fwd = self.diffusion.get_std_fwd(step, xdim=xt.shape[1:])
+                pred_x0 = xt - std_fwd * out
+                if clip_denoise: pred_x0.clamp_(-1., 1.)
+                return pred_x0
+              
             
-            num_sampling_rounds = Nl // opt.batch_size + 1
-            numrem=Nl % opt.batch_size
+            num_sampling_rounds = Nl // self.mlmc_batch_size + 1
+            numrem=Nl % self.mlmc_batch_size
             for r in range(num_sampling_rounds):
-                bs=numrem if r==num_sampling_rounds-1 else opt.batch_size
+                bs=numrem if r==num_sampling_rounds-1 else self.mlmc_batch_size
                 if bs==0:
                     break
                 with torch.no_grad():
                     Xf, Xc = self.diffusion.mlmcsample(
-                        steps, M, pred_x0_fn, x1, mask=mask, ot_ode=opt.ot_ode, 
+                        steps, M, pred_x0_fn, corrupt_img, bs, mask=mask, ot_ode=opt.ot_ode, 
                         log_steps=None, verbose=verbose)
                 fine_payoff=self.payoff(Xf)
                 coarse_payoff=self.payoff(Xc)
@@ -367,9 +365,9 @@ class Runner(object):
         return sums,sqsums 
     
     
-    def Giles_plot(self,opt, x1, mask, cond):
+    def Giles_plot(self,acc,opt, corrupt_img, mask, cond):
+        torch.cuda.empty_cache() 
         #Set mlmc params
-        acc=opt.mlmc.acc
         M=self.M
         N0=self.N0
         Lmax=self.Lmax
@@ -379,7 +377,7 @@ class Runner(object):
         
         # Directory to save means and norms                                                                                               
         this_sample_dir = os.path.join(eval_dir, f"VarMean_M_{M}_Nsamples_{Nsamples}")
-        tpayoffshape=self.payoff(torch.randn(*x1.shape)).shape[1:]
+        tpayoffshape=self.payoff(torch.randn(*corrupt_img.shape)).shape[1:]
         sums=torch.zeros((1,3,*tpayoffshape))
         sqsums=torch.zeros((1,4,*tpayoffshape))
 
@@ -391,7 +389,7 @@ class Runner(object):
             print(f'Proceeding to calculate variance and means with {Nsamples} estimator samples')
             for i,l in enumerate(range(Lmax+1)):
                 print(f'l={l}')
-                sums[i],sqsums[i] = self.mlmclooper(Nsamples, l ,M, opt, x1, mask, cond, clip_denoise=opt.clip_denoise, log_count=0, verbose=False)
+                sums[i],sqsums[i] = self.mlmclooper(Nsamples, l ,M, opt, corrupt_img, mask, cond, clip_denoise=opt.clip_denoise, log_count=0, verbose=False)
             
             
             # Write samples to disk or Google Cloud Storage
@@ -440,7 +438,7 @@ class Runner(object):
         for i in range(len(acc)):
             e=acc[i]
             print(f'Performing mlmc for accuracy={e}')
-            sums,sqsums,N=self.mlmc(e,Lmin,alpha_0=alpha,beta_0=beta,opt=opt, x1=x1, mask=mask, cond=cond) #sums=[dX,Xf,Xc], sqsums=[||dX||^2,||Xf||^2,||Xc||^2]
+            sums,sqsums,N=self.mlmc(e,Lmin,alpha_0=alpha,beta_0=beta,opt=opt, corrupt_img=corrupt_img, mask=mask, cond=cond) #sums=[dX,Xf,Xc], sqsums=[||dX||^2,||Xf||^2,||Xc||^2]
             L=len(N)-1+Lmin
             means_p=imagenorm(sums[:,1])/N #Norm of mean of fine discretisations
             V_p=torch.clip(mom2norm(sqsums[:,1])/N-means_p**2,min=0)
@@ -475,7 +473,7 @@ class Runner(object):
 
         return None
 
-    def mlmc(self,accuracy,Lmin,alpha_0,beta_0, opt, x1, mask, cond, clip_denoise=False, log_count=0, verbose=False):
+    def mlmc(self,accuracy,Lmin,alpha_0,beta_0, opt, corrupt_img, mask, cond, clip_denoise=False, log_count=0, verbose=False):
         accsplit=self.accsplit
         #Orders of convergence
         alpha=max(0,alpha_0)
@@ -496,7 +494,7 @@ class Runner(object):
             for i,l in enumerate(torch.arange(Lmin,L+1)):
                 num=dN[i]
                 if num>0: #If asked for additional samples...
-                    tempsums,tempsqsums=self.mlmclooper(int(num), l ,M, opt, x1, mask, cond, clip_denoise, log_count, verbose) #Call function which gives sums
+                    tempsums,tempsqsums=self.mlmclooper(int(num), l ,M, opt, corrupt_img, mask, cond, clip_denoise, log_count, verbose) #Call function which gives sums
                     if not it0_ind:
                         sums=torch.zeros((mylen,*tempsums.shape)) #Initialise sums array of unnormed [dX,Xf,Xc], each column is a level
                         sqsums=torch.zeros((mylen,*tempsqsums.shape)) #Initialise sqsums array of normed [dX^2,Xf^2,Xc^2,XcXf], each column is a level
