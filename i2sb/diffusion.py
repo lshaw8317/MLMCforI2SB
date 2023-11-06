@@ -115,7 +115,6 @@ class Diffusion():
     
     def mysampler_fun(self,pred_x0_fn,x,step,prev_step,dW,ot_ode,mask,corrupt_img):
         vec_step=torch.full((x.shape[0],), step, device=x.device, dtype=torch.long)
-        print(x.device,vec_step.device)
         pred_x0 = pred_x0_fn(x, vec_step)
         assert prev_step < step
         std_n     = self.std_fwd[step]

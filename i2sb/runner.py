@@ -110,11 +110,11 @@ class Runner(object):
             self.ema.load_state_dict(checkpoint["ema"])
             log.info(f"[Ema] Loaded ema ckpt: {opt.load}!")
         
-        if mlmcoptions:
+        if mlmcoptions is not None:
             #MLMC params
             self.M=mlmcoptions.M
             self.Lmax=mlmcoptions.Lmax
-            self.Lmin=mlmcoptions.Lmin
+            self.Lmin=0#mlmcoptions.Lmin
             self.mlmc_batch_size=mlmcoptions.batch_size
             self.accsplit=mlmcoptions.accsplit
             self.N0=mlmcoptions.N0
@@ -128,7 +128,7 @@ class Runner(object):
                 print('mlmcoptions payoff arg not recognised, Setting to mean payoff by default')
                 self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
                 
-            self.net = torch.nn.DataParallel(self.net)
+            self.net.diffusion_model = torch.nn.DataParallel(self.net.diffusion_model)
 
         self.net.to(opt.device)
         self.ema.to(opt.device)
@@ -292,6 +292,7 @@ class Runner(object):
 
         return xs, pred_x0
     
+    @torch.no_grad()
     def mlmclooper(self, Nl, l ,M, opt, corrupt_img, mask=None, cond=None, clip_denoise=False, log_count=0, verbose=True):
         # create discrete time steps that split [0, INTERVAL] into NFE sub-intervals.
         # e.g., if NFE=2 & INTERVAL=1000, then STEPS=[0, 500, 999] and 2 network
@@ -372,7 +373,7 @@ class Runner(object):
         N0=self.N0
         Lmax=self.Lmax
         eval_dir = self.eval_dir
-        Nsamples=1000
+        Nsamples=100
         Lmin=self.Lmin
         
         # Directory to save means and norms                                                                                               
@@ -392,13 +393,13 @@ class Runner(object):
                 sums[i],sqsums[i] = self.mlmclooper(Nsamples, l ,M, opt, corrupt_img, mask, cond, clip_denoise=opt.clip_denoise, log_count=0, verbose=False)
             
             
-            # Write samples to disk or Google Cloud Storage
-            with open(os.path.join(this_sample_dir, "averages.pt"), "wb") as fout:
-                torch.save(sums/Nsamples,fout)
-            with open(os.path.join(this_sample_dir, "sqaverages.pt"), "wb") as fout:
-                torch.save(sqsums/Nsamples,fout)
-            with open(os.path.join(this_sample_dir, "avgcost.pt"), "wb") as fout:
-                torch.save(torch.cat((torch.tensor([1]),(1+1./M)*M**torch.arange(1,Lmax+1))),fout)
+                # Write samples to disk or Google Cloud Storage
+                with open(os.path.join(this_sample_dir, "averages.pt"), "wb") as fout:
+                    torch.save(sums/Nsamples,fout)
+                with open(os.path.join(this_sample_dir, "sqaverages.pt"), "wb") as fout:
+                    torch.save(sqsums/Nsamples,fout)
+                with open(os.path.join(this_sample_dir, "avgcost.pt"), "wb") as fout:
+                    torch.save(torch.cat((torch.tensor([1]),(1+1./M)*M**torch.arange(1,Lmax+1))),fout)
             
             means_dp=imagenorm(sums[:,0])/Nsamples
             V_dp=mom2norm(sqsums[:,0])/Nsamples-means_dp**2  

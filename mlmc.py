@@ -159,7 +159,7 @@ if __name__ == '__main__':
     parser.add_argument("--M",     type=int,  default=2)
     parser.add_argument("--N0",           type=str,  default=100,        help="initial MLMC samples")
     parser.add_argument("--Lmin",   type=int, default=4,          help="minimum level")
-    parser.add_argument("--Lmax",       type=int, default=11,          help="maximum level")
+    parser.add_argument("--Lmax",       type=int, default=8,          help="maximum level")
     parser.add_argument("--accsplit",       type=float, default=np.sqrt(.5),          help="bias-variance splitting")
     parser.add_argument("--acc",       type=list, default=[.1],          help="accuracies for MLMC")
     parser.add_argument("--payoff",       type=str, default='mean',          help="payoff for MLMC")
