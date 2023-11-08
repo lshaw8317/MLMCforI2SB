@@ -12,7 +12,6 @@
 # found in this directory (LICENSE_DDRM).
 # The modifications to this file are subject to the same license.
 # ---------------------------------------------------------------
-
 import torch
 from .base import H_functions
 

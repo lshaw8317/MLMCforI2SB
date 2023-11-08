@@ -121,19 +121,19 @@ def main(opt):
     
     for it,out in enumerate(val_loader):
         corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
+        
+        y = y.to(opt.device)
+
+        tu.save_image((out[0]+1)/2, os.path.join(mlmcoptions.eval_dir,"clean.png"))
+        tu.save_image((corrupt_img+1)/2, os.path.join(mlmcoptions.eval_dir,"corrupt.png"))
+        tu.save_image((x1+1)/2, os.path.join(mlmcoptions.eval_dir,"x1.png"))
+        with open(os.path.join(mlmcoptions.eval_dir, "label.pt"), "wb") as fout:
+            torch.save(y,fout)
+        with open(os.path.join(mlmcoptions.eval_dir, "mask.pt"), "wb") as fout:
+            torch.save(mask,fout)
 
         #corrupt_img, x1, mask, cond, y=corrupt_img[0], x1[0], mask[0], cond[0], y[0]
         runner.Giles_plot(opt.acc,ckpt_opt, corrupt_img.to('cpu'), mask=mask, cond=cond)
-
-        y = y.to(opt.device)
-
-        tu.save_image((out[0]+1)/2, "clean.png")
-        tu.save_image((corrupt_img+1)/2, opt.mlmc.eval_dir+"corrupt.png")
-        tu.save_image((x1+1)/2, opt.mlmc.eval_dir+"x1.png")
-        with open(os.path.join(opt.mlmc.eval_dir, "label.pt"), "wb") as fout:
-            torch.save(y,fout)
-        with open(os.path.join(opt.mlmc.eval_dir, "mask.pt"), "wb") as fout:
-            torch.save(mask,fout)
         if it==0:
             break
     del runner

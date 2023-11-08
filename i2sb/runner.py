@@ -135,6 +135,15 @@ class Runner(object):
 
         self.log = log
 
+        self.ema.average_parameters()
+        self.net.eval()
+
+    def pred_x0_fn(self,xt, step,cond):
+        out = self.net(xt, step, cond=cond)
+        std_fwd = self.diffusion.get_std_fwd(step, xdim=xt.shape[1:])
+        pred_x0 = xt - std_fwd * out
+        return pred_x0
+        
     def compute_label(self, step, x0, xt):
         """ Eq 12 """
         std_fwd = self.diffusion.get_std_fwd(step, xdim=x0.shape[1:])
@@ -300,6 +309,7 @@ class Runner(object):
         nfe = M**l
         assert 0 < nfe < opt.interval == len(self.diffusion.betas)
         steps = util.space_indices(opt.interval, nfe+1)
+        torch.cuda.empty_cache()
 
         assert cond==None
         # # create log steps
@@ -307,61 +317,50 @@ class Runner(object):
         # log_steps = [steps[i] for i in util.space_indices(len(steps)-1, log_count)]
         # assert log_steps[0] == 0
         # self.log.info(f"[MLMC loop Sampling] steps={opt.interval}, {nfe=}, {log_steps=}!")
-        
-        with self.ema.average_parameters():
-            self.net.eval()
-
-            def pred_x0_fn(xt, step):
-                out = self.net(xt, step, cond=cond)
-                std_fwd = self.diffusion.get_std_fwd(step, xdim=xt.shape[1:])
-                pred_x0 = xt - std_fwd * out
-                if clip_denoise: pred_x0.clamp_(-1., 1.)
-                return pred_x0
               
-            
-            num_sampling_rounds = Nl // self.mlmc_batch_size + 1
-            numrem=Nl % self.mlmc_batch_size
-            for r in range(num_sampling_rounds):
-                bs=numrem if r==num_sampling_rounds-1 else self.mlmc_batch_size
-                if bs==0:
-                    break
-                with torch.no_grad():
-                    Xf, Xc = self.diffusion.mlmcsample(
-                        steps, M, pred_x0_fn, corrupt_img, bs, mask=mask, ot_ode=opt.ot_ode, 
-                        log_steps=None, verbose=verbose)
-                fine_payoff=self.payoff(Xf)
-                coarse_payoff=self.payoff(Xc)
-                if r==0:
-                    sums=torch.zeros((3,*fine_payoff.shape[1:])) #skip batch_size
-                    sqsums=torch.zeros((4,*fine_payoff.shape[1:]))
-                sumXf=torch.sum(fine_payoff,axis=0).to('cpu') #sum over batch size
-                sumXf2=torch.sum(fine_payoff**2,axis=0).to('cpu')
-                if l==self.Lmin:
-                    sqsums+=torch.stack([sumXf2,sumXf2,torch.zeros_like(sumXf2),torch.zeros_like(sumXf2)])
-                    sums+=torch.stack([sumXf,sumXf,torch.zeros_like(sumXf)])
-                elif l<self.Lmin:
-                    raise ValueError("l must be at least Lmin")
-                else:
-                    dX_l=fine_payoff-coarse_payoff #Image difference
-                    sumdX_l=torch.sum(dX_l,axis=0).to('cpu') #sum over batch size
-                    sumdX_l2=torch.sum(dX_l**2,axis=0).to('cpu')
-                    sumXc=torch.sum(coarse_payoff,axis=0).to('cpu')
-                    sumXc2=torch.sum(coarse_payoff**2,axis=0).to('cpu')
-                    sumXcXf=torch.sum(coarse_payoff*fine_payoff,axis=0).to('cpu')
-                    sums+=torch.stack([sumdX_l,sumXf,sumXc])
-                    sqsums+=torch.stack([sumdX_l2,sumXf2,sumXc2,sumXcXf])
 
-            # Directory to save samples. Just to save an example sample for debugging
-            if l>self.Lmin:
-                this_sample_dir = os.path.join(self.eval_dir, f"level_{l}")
-                if not os.path.exists(this_sample_dir):
-                    os.mkdir(this_sample_dir)
-                samples_f=np.clip(Xf.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
-                samples_c=np.clip(Xc.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
-                with open(os.path.join(this_sample_dir, "samples_f.npz"), "wb") as fout:
-                    np.savez_compressed(fout, samplesf=samples_f)
-                with open(os.path.join(this_sample_dir, "samples_c.npz"), "wb") as fout:
-                    np.savez_compressed(fout, samplesc=samples_c)
+        num_sampling_rounds = Nl // self.mlmc_batch_size + 1
+        numrem=Nl % self.mlmc_batch_size
+        for r in range(num_sampling_rounds):
+            bs=numrem if r==num_sampling_rounds-1 else self.mlmc_batch_size
+            if bs==0:
+                break
+            with torch.no_grad():
+                Xf, Xc = self.diffusion.mlmcsample(
+                    steps, M, self.pred_x0_fn, corrupt_img, bs, mask=mask, ot_ode=opt.ot_ode, 
+                    log_steps=None, verbose=verbose)
+            fine_payoff=self.payoff(Xf)
+            coarse_payoff=self.payoff(Xc)
+            if r==0:
+                sums=torch.zeros((3,*fine_payoff.shape[1:])) #skip batch_size
+                sqsums=torch.zeros((4,*fine_payoff.shape[1:]))
+            sumXf=torch.sum(fine_payoff,axis=0).to('cpu') #sum over batch size
+            sumXf2=torch.sum(fine_payoff**2,axis=0).to('cpu')
+            if l==self.Lmin:
+                sqsums+=torch.stack([sumXf2,sumXf2,torch.zeros_like(sumXf2),torch.zeros_like(sumXf2)])
+                sums+=torch.stack([sumXf,sumXf,torch.zeros_like(sumXf)])
+            elif l<self.Lmin:
+                raise ValueError("l must be at least Lmin")
+            else:
+                dX_l=fine_payoff-coarse_payoff #Image difference
+                sumdX_l=torch.sum(dX_l,axis=0).to('cpu') #sum over batch size
+                sumdX_l2=torch.sum(dX_l**2,axis=0).to('cpu')
+                sumXc=torch.sum(coarse_payoff,axis=0).to('cpu')
+                sumXc2=torch.sum(coarse_payoff**2,axis=0).to('cpu')
+                sumXcXf=torch.sum(coarse_payoff*fine_payoff,axis=0).to('cpu')
+                sums+=torch.stack([sumdX_l,sumXf,sumXc])
+                sqsums+=torch.stack([sumdX_l2,sumXf2,sumXc2,sumXcXf])
+        # Directory to save samples. Just to save an example sample for debugging
+        if l>self.Lmin:
+            this_sample_dir = os.path.join(self.eval_dir, f"level_{l}")
+            if not os.path.exists(this_sample_dir):
+                os.mkdir(this_sample_dir)
+            samples_f=np.clip(Xf.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
+            samples_c=np.clip(Xc.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
+            with open(os.path.join(this_sample_dir, "samples_f.npz"), "wb") as fout:
+                np.savez_compressed(fout, samplesf=samples_f)
+            with open(os.path.join(this_sample_dir, "samples_c.npz"), "wb") as fout:
+                np.savez_compressed(fout, samplesc=samples_c)
                                     
         return sums,sqsums 
     
@@ -373,7 +372,7 @@ class Runner(object):
         N0=self.N0
         Lmax=self.Lmax
         eval_dir = self.eval_dir
-        Nsamples=100
+        Nsamples=1000
         Lmin=self.Lmin
         
         # Directory to save means and norms                                                                                               

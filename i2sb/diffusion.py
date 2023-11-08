@@ -113,9 +113,9 @@ class Diffusion():
         stack_bwd_traj = lambda z: torch.flip(torch.stack(z, dim=1), dims=(1,))
         return stack_bwd_traj(xs), stack_bwd_traj(pred_x0s)
     
-    def mysampler_fun(self,pred_x0_fn,x,step,prev_step,dW,ot_ode,mask,corrupt_img):
+    def mysampler_fun(self,pred_x0_fn,x,step,prev_step,dW,ot_ode,mask,corrupt_img,cond):
         vec_step=torch.full((x.shape[0],), step, device=x.device, dtype=torch.long)
-        pred_x0 = pred_x0_fn(x, vec_step)
+        pred_x0 = pred_x0_fn(x, vec_step,cond)
         assert prev_step < step
         std_n     = self.std_fwd[step]
         std_nprev = self.std_fwd[prev_step]
@@ -135,7 +135,7 @@ class Diffusion():
         return x
     
     @torch.no_grad()
-    def mlmcsample(self, finesteps, M, pred_x0_fn, corrupt_img,bs, mask=None, ot_ode=False, log_steps=None, verbose=True):
+    def mlmcsample(self, finesteps, M, pred_x0_fn, corrupt_img,bs,cond=None, mask=None, ot_ode=False, log_steps=None, verbose=True):
         filler=tuple([1 for i in range(len(corrupt_img.shape[1:]))])
         corrupt_img=corrupt_img.detach().repeat(bs,*filler).to(self.device)
         xf = corrupt_img.clone().detach().to(self.device)     
@@ -145,15 +145,16 @@ class Diffusion():
         finesteps = finesteps[::-1]
         fine_pair = zip(finesteps[1:], finesteps[:-1])
         counter=0
+        coarse_step=finesteps[0]
         for prev_step, step in fine_pair:
             dWf=torch.randn_like(xf).to(self.device)
-            xf=self.mysampler_fun(pred_x0_fn,xf,step,prev_step,dWf,ot_ode,mask,corrupt_img)
+            xf=self.mysampler_fun(pred_x0_fn,xf,step,prev_step,dWf,ot_ode,mask,corrupt_img,cond)
             dWc+=dWf*torch.sqrt(torch.tensor([1./M]).to(self.device))
             counter+=1
             if counter==M:
-                xc=self.mysampler_fun(pred_x0_fn,xc,step,prev_step,dWc,ot_ode,mask,corrupt_img)
+                xc=self.mysampler_fun(pred_x0_fn,xc,coarse_step,prev_step,dWc,ot_ode,mask,corrupt_img,cond)
                 dWc*=0.
                 counter=0
-            
+                coarse_step=prev_step
         return xf,xc
      
