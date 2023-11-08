@@ -6,4 +6,5 @@
 # ---------------------------------------------------------------
 
 from .runner import Runner
+from .mlmcrunner import MLMCRunner
 from .ckpt_util import download_ckpt, download

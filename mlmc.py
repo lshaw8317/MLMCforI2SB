@@ -30,7 +30,7 @@ import torchvision.utils as tu
 
 from logger import Logger
 import distributed_util as dist_util
-from i2sb import Runner, download_ckpt
+from i2sb import MLMCRunner, download_ckpt
 from corruption import build_corruption
 from dataset import imagenet
 from i2sb import ckpt_util
@@ -107,7 +107,7 @@ def main(opt):
     mlmcoptions=edict(M=opt.M,N0=opt.N0,Lmin=opt.Lmin,Lmax=opt.Lmax,payoff=opt.payoff,
                       accsplit=opt.accsplit,eval_dir=sample_dir,acc=opt.acc,batch_size=opt.batch_size)
     
-    runner = Runner(ckpt_opt, log, mlmcoptions,save_opt=False)
+    runner = MLMCRunner(ckpt_opt, log, mlmcoptions,save_opt=False)
 
     # handle use_fp16 for ema
     if opt.use_fp16:
