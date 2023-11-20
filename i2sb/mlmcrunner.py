@@ -180,7 +180,7 @@ class MLMCRunner(object):
         N0=self.N0
         Lmax=self.Lmax
         eval_dir = self.eval_dir
-        Nsamples=1000
+        Nsamples=100
         Lmin=self.Lmin
         
         # Directory to save means and norms                                                                                               
@@ -213,14 +213,14 @@ class MLMCRunner(object):
             means_p=imagenorm(sums[:,1])/Nsamples
             V_p=mom2norm(sqsums[:,1])/Nsamples-means_p**2  
             #Estimate orders of weak (alpha from means) and strong (beta from variance) convergence using LR
-            cutoff=np.argmax(V_dp<(np.sqrt(M)-1.)**2*V_p[-1]/(1+M))-1 #index of optimal lmin 
+            cutoff=np.argmax(V_dp[1:]<(np.sqrt(M)-1.)**2*V_p[-1]/(1+M)) #index of optimal lmin 
             means_p=means_p[cutoff:]
             V_p=V_p[cutoff:]
             means_dp=means_dp[cutoff:]
             V_dp=V_dp[cutoff:]
             
-            X=np.ones((Lmax-cutoff+1,2))
-            X[:,0]=np.arange(1,Lmax+1)
+            X=np.ones((Lmax-cutoff,2))
+            X[:,0]=np.arange(1.,Lmax-cutoff+1)
             a = np.linalg.lstsq(X,np.log(means_dp[1:]),rcond=None)[0]
             alpha = -a[0]/np.log(M)
             Y0=np.exp(a[1])

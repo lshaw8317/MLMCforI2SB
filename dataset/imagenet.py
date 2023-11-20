@@ -116,13 +116,13 @@ def build_lmdb_dataset_val10k(opt, log, transform=None):
     log.info(f"[Dataset] Built Imagenet val10k, size={len(dataset)}!")
     return dataset
 
-class InpaintingVal10kSubset(Dataset):
+class InpaintingValSubset(Dataset):
     def __init__(self, opt, log, mask):
-        super(InpaintingVal10kSubset, self).__init__()
+        super(InpaintingValSubset, self).__init__()
 
         assert mask in ["center", "freeform1020", "freeform2030"]
         self.mask_type = mask
-        self.dataset = build_lmdb_dataset_val10k(opt, log)
+        self.dataset = build_lmdb_dataset(opt, log,train=False)
 
         from corruption.inpaint import get_center_mask, load_freeform_masks
         if self.mask_type == "center":

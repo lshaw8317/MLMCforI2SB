@@ -54,8 +54,7 @@ def build_dataset(opt, log, corrupt_type):
         val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
     elif "inpaint" in corrupt_type:
         mask = corrupt_type.split("-")[1]
-        raise Exception('Not yet implemented.')
-        val_dataset = imagenet.InpaintingVal10kSubset(opt, log, mask) # subset 10k val + mask
+        val_dataset = imagenet.InpaintingValSubset(opt, log, mask) # subset 10k val + mask
     elif corrupt_type == "mixture":
         from corruption.mixture import MixtureCorruptDatasetVal
         val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False)
@@ -92,7 +91,9 @@ def main(opt):
     # get (default) ckpt option
     ckpt_opt = ckpt_util.build_ckpt_option(opt, log, RESULT_DIR / opt.ckpt)
     corrupt_type = ckpt_opt.corrupt
-
+    ckpt_opt.interval=2*opt.M**opt.Lmax
+    print(ckpt_opt)
+    
     # build corruption method
     corrupt_method = build_corruption(opt, log, corrupt_type=corrupt_type)
 

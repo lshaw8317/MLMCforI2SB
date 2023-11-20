@@ -122,7 +122,7 @@ class Diffusion():
         std_delta = (std_n**2 - std_nprev**2).sqrt()
         mu_x0, mu_xn, var = compute_gaussian_product_coef(std_nprev, std_delta)
         x = mu_x0 * pred_x0 + mu_xn * x
-        if not ot_ode and prev_step > 0:
+        if not ot_ode and prev_step>0.:
             x = x + var.sqrt() * dW
 
         if mask is not None:
@@ -138,7 +138,11 @@ class Diffusion():
     def mlmcsample(self, finesteps, M, pred_x0_fn, corrupt_img,bs,cond=None, mask=None, ot_ode=False, log_steps=None, verbose=True):
         filler=tuple([1 for i in range(len(corrupt_img.shape[1:]))])
         corrupt_img=corrupt_img.detach().repeat(bs,*filler).to(self.device)
-        xf = corrupt_img.clone().detach().to(self.device)     
+        if mask is None:
+            xf = corrupt_img.clone().detach().to(self.device)
+        else:
+            mask=mask.to(self.device)
+            xf = (1. - mask) * corrupt_img + mask *torch.randn_like(corrupt_img).to(self.device)
         xc = xf.clone().detach().to(self.device)
         dWc=torch.zeros_like(xc).to(self.device)
         assert len(finesteps)<len(self.betas) 
