@@ -91,15 +91,13 @@ def main(opt):
     # get (default) ckpt option
     ckpt_opt = ckpt_util.build_ckpt_option(opt, log, RESULT_DIR / opt.ckpt)
     corrupt_type = ckpt_opt.corrupt
-    ckpt_opt.interval=2*opt.M**opt.Lmax
-    print(ckpt_opt)
     
     # build corruption method
     corrupt_method = build_corruption(opt, log, corrupt_type=corrupt_type)
 
     # build imagenet val dataset
     valdataset= build_dataset(opt, log, corrupt_type)
-
+    
     # build runner
     sample_dir = RESULT_DIR / opt.ckpt / "{}{}".format(
         datetime.datetime.now().strftime('%y%m%d_%H%M%S'),"_clip" if opt.clip_denoise else ""
@@ -112,10 +110,11 @@ def main(opt):
 
     # handle use_fp16 for ema
     if opt.use_fp16:
+        raise Exception('fp16 not enabled')
         runner.ema.copy_to() # copy weight from ema to net
         runner.net.diffusion_model.convert_to_fp16()
         runner.ema = ExponentialMovingAverage(runner.net.parameters(), decay=0.99) # re-init ema with fp16 weight
-
+        
     val_loader = DataLoader(valdataset,
         batch_size=1, shuffle=False, pin_memory=True, num_workers=1, drop_last=False,
     )

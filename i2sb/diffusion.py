@@ -122,14 +122,14 @@ class Diffusion():
         std_delta = (std_n**2 - std_nprev**2).sqrt()
         mu_x0, mu_xn, var = compute_gaussian_product_coef(std_nprev, std_delta)
         x = mu_x0 * pred_x0 + mu_xn * x
-        if not ot_ode and prev_step>0.:
+        if not ot_ode and prev_step>0:
             x = x + var.sqrt() * dW
 
         if mask is not None:
             xt_true = corrupt_img
             if not ot_ode:
                 _prev_step = torch.full((x.shape[0],), prev_step, device=self.device, dtype=torch.long)
-                std_sb = unsqueeze_xdim(self.std_sb[_prev_step], xdim=x1.shape[1:])
+                std_sb = unsqueeze_xdim(self.std_sb[_prev_step], xdim=corrupt_img.shape[1:])
                 xt_true = xt_true + std_sb * torch.randn_like(xt_true)
             x = (1. - mask) * xt_true + mask * x
         return x

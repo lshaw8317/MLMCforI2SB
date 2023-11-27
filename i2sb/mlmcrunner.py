@@ -87,12 +87,12 @@ class MLMCRunner(object):
         self.eval_dir=mlmcoptions.eval_dir
     
         if mlmcoptions.payoff=='mean':
-            self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
+            self.payoff=lambda x: torch.clip((x+1.)/2,0.,1.) #[-1,1]->[0,1]
         elif mlmcoptions.payoff=='secondmoment':
-            self.payoff=lambda x: torch.clip((x+1)/2,0.,1.)**2 #[-1,1]->[0,1]
+            self.payoff=lambda x: torch.clip((x+1.)/2,0.,1.)**2 #[-1,1]->[0,1]
         else:
             print('mlmcoptions payoff arg not recognised, Setting to mean payoff by default')
-            self.payoff=lambda x: torch.clip((x+1)/2,0.,1.) #[-1,1]->[0,1]
+            self.payoff=lambda x: torch.clip((x+1.)/2,0.,1.) #[-1,1]->[0,1]
         
         self.ema.store()
         self.ema.copy_to()
@@ -100,6 +100,7 @@ class MLMCRunner(object):
         self.ema.to(opt.device)
         self.net.eval()
         self.net.diffusion_model = torch.nn.DataParallel(self.net.diffusion_model)
+        self.device=opt.device
 
         self.log = log
 
@@ -110,11 +111,39 @@ class MLMCRunner(object):
         return pred_x0
 
     @torch.no_grad()
+    def mlmcsample(self, finesteps, M, corrupt_img,bs,cond=None, mask=None, ot_ode=False, log_steps=None, verbose=True):
+        filler=tuple([1 for i in range(len(corrupt_img.shape[1:]))])
+        corrupt_img=corrupt_img.detach().repeat(bs,*filler).to(self.device)
+        if mask is None:
+            xf = corrupt_img.clone().detach().to(self.device)
+        else:
+            mask=mask.to(self.device)
+            xf = (1. - mask) * corrupt_img + mask *torch.randn_like(corrupt_img).to(self.device)
+        xc = xf.clone().detach().to(self.device)
+        dWc=torch.zeros_like(xc).to(self.device)
+        assert len(finesteps)<len(self.diffusion.betas)
+        finesteps = finesteps[::-1]
+        fine_pair = zip(finesteps[1:], finesteps[:-1])
+        counter=0
+        coarse_step=finesteps[0]
+        for prev_step, step in fine_pair:
+            dWf=torch.randn_like(xf).to(self.device)
+            xf=self.diffusion.mysampler_fun(self.pred_x0_fn,xf,step,prev_step,dWf,ot_ode,mask,corrupt_img,cond)
+            dWc+=dWf*torch.sqrt(torch.tensor([1./M]).to(self.device))
+            counter+=1
+            if counter==M:
+                xc=self.diffusion.mysampler_fun(self.pred_x0_fn,xc,coarse_step,prev_step,dWc,ot_ode,mask,corrupt_img,cond)
+                dWc*=0.
+                counter=0
+                coarse_step=prev_step
+        return xf,xc
+    
+    @torch.no_grad()
     def mlmclooper(self, Nl, l ,M, opt, corrupt_img, mask=None, cond=None, clip_denoise=False, log_count=0, verbose=True):
         # create discrete time steps that split [0, INTERVAL] into NFE sub-intervals.
         # e.g., if NFE=2 & INTERVAL=1000, then STEPS=[0, 500, 999] and 2 network
         # evaluations will be invoked, first from 999 to 500, then from 500 to 0.
-        nfe = M**l
+        nfe = int(M**l)
         assert 0 < nfe < opt.interval == len(self.diffusion.betas)
         steps = util.space_indices(opt.interval, nfe+1)
         torch.cuda.empty_cache()
@@ -134,8 +163,8 @@ class MLMCRunner(object):
             if bs==0:
                 break
             with torch.no_grad():
-                Xf, Xc = self.diffusion.mlmcsample(
-                    steps, M, self.pred_x0_fn, corrupt_img, bs, mask=mask, ot_ode=opt.ot_ode, 
+                Xf, Xc = self.mlmcsample(
+                    steps, M, corrupt_img, bs, mask=mask, ot_ode=opt.ot_ode, 
                     log_steps=None, verbose=verbose)
             fine_payoff=self.payoff(Xf)
             coarse_payoff=self.payoff(Xc)
@@ -163,8 +192,8 @@ class MLMCRunner(object):
             this_sample_dir = os.path.join(self.eval_dir, f"level_{l}")
             if not os.path.exists(this_sample_dir):
                 os.mkdir(this_sample_dir)
-            samples_f=np.clip(Xf.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
-            samples_c=np.clip(Xc.permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
+            samples_f=np.clip(.5*(Xf+1.).permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
+            samples_c=np.clip(.5*(Xc+1.).permute(0, 2, 3, 1).cpu().numpy() * 255., 0, 255).astype(np.uint8)
             with open(os.path.join(this_sample_dir, "samples_f.npz"), "wb") as fout:
                 np.savez_compressed(fout, samplesf=samples_f)
             with open(os.path.join(this_sample_dir, "samples_c.npz"), "wb") as fout:
@@ -213,7 +242,8 @@ class MLMCRunner(object):
             means_p=imagenorm(sums[:,1])/Nsamples
             V_p=mom2norm(sqsums[:,1])/Nsamples-means_p**2  
             #Estimate orders of weak (alpha from means) and strong (beta from variance) convergence using LR
-            cutoff=np.argmax(V_dp[1:]<(np.sqrt(M)-1.)**2*V_p[-1]/(1+M)) #index of optimal lmin 
+            Lmincond=V_dp[1:]<(np.sqrt(M)-1.)**2*V_p[-1]/(1+M) #index of optimal lmin
+            cutoff=np.argmax(Lmincond[1:]*Lmincond[:-1])
             means_p=means_p[cutoff:]
             V_p=V_p[cutoff:]
             means_dp=means_dp[cutoff:]
@@ -239,8 +269,6 @@ class MLMCRunner(object):
             alpha=temp[0].item()
             beta=temp[1].item()
             Lmin=int(temp[-1])
-            print(alpha,beta,Lmin)
-        assert Lmin == self.Lmin
         
         #Do the calculations and simulations for num levels and complexity plot
         for i in range(len(acc)):

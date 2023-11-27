@@ -94,10 +94,21 @@ class Runner(object):
             self.ema.load_state_dict(checkpoint["ema"])
             log.info(f"[Ema] Loaded ema ckpt: {opt.load}!")
 
+        self.ema.store()
+        self.ema.copy_to()
         self.net.to(opt.device)
         self.ema.to(opt.device)
+        self.net.eval()
+        self.net.diffusion_model = torch.nn.DataParallel(self.net.diffusion_model)
 
         self.log = log
+
+    def pred_x0_fn(self,xt, step):
+        vec_step = torch.full((xt.shape[0],), step, device=xt.device, dtype=torch.long)
+        out = self.net(xt, vec_step, cond=None)
+        std_fwd = self.diffusion.get_std_fwd(step, xdim=xt.shape[1:])
+        pred_x0 = xt - std_fwd * out
+        return pred_x0
 
     def compute_label(self, step, x0, xt):
         """ Eq 12 """
@@ -239,17 +250,8 @@ class Runner(object):
             mask = mask.to(opt.device)
             x1 = (1. - mask) * x1 + mask * torch.randn_like(x1)
 
-        with self.ema.average_parameters():
-            self.net.eval()
-
-            def pred_x0_fn(xt, step):
-                step = torch.full((xt.shape[0],), step, device=opt.device, dtype=torch.long)
-                out = self.net(xt, step, cond=cond)
-                return self.compute_pred_x0(step, xt, out, clip_denoise=clip_denoise)
-
-            xs, pred_x0 = self.diffusion.ddpm_sampling(
-                steps, pred_x0_fn, x1, mask=mask, ot_ode=opt.ot_ode, log_steps=log_steps, verbose=verbose,
-            )
+        xs, pred_x0 = self.diffusion.ddpm_sampling(
+                steps, self.pred_x0_fn, x1, mask=mask, ot_ode=opt.ot_ode, log_steps=log_steps, verbose=verbose)
 
         b, *xdim = x1.shape
         assert xs.shape == pred_x0.shape == (b, log_count, *xdim)

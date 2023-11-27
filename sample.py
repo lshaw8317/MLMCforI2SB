@@ -86,7 +86,7 @@ def build_val_dataset(opt, log, corrupt_type):
         val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
     elif "inpaint" in corrupt_type:
         mask = corrupt_type.split("-")[1]
-        val_dataset = imagenet.InpaintingVal10kSubset(opt, log, mask) # subset 10k val + mask
+        val_dataset = imagenet.InpaintingValSubset(opt, log, mask) # subset 10k val + mask
     elif corrupt_type == "mixture":
         from corruption.mixture import MixtureCorruptDatasetVal
         val_dataset = imagenet.build_lmdb_dataset_val10k(opt, log)
@@ -161,7 +161,6 @@ def main(opt):
         runner.ema.copy_to() # copy weight from ema to net
         runner.net.diffusion_model.convert_to_fp16()
         runner.ema = ExponentialMovingAverage(runner.net.parameters(), decay=0.99) # re-init ema with fp16 weight
-
     # create save folder
     recon_imgs_fn = get_recon_imgs_fn(opt, nfe)
     log.info(f"Recon images will be saved to {recon_imgs_fn}!")
@@ -176,6 +175,7 @@ def main(opt):
         xs, _ = runner.ddpm_sampling(
             ckpt_opt, x1, mask=mask, cond=cond, clip_denoise=opt.clip_denoise, nfe=nfe, verbose=opt.n_gpu_per_node==1
         )
+        print(xs.shape)
         recon_img = xs[:, 0, ...].to(opt.device)
 
         assert recon_img.shape == corrupt_img.shape
@@ -187,7 +187,7 @@ def main(opt):
             log.info("Saved debug images!")
 
         # [-1,1]
-        gathered_recon_img = collect_all_subset(recon_img, log)
+        gathered_recon_img = collect_all_subset(recon_img.contiguous(), log)
         recon_imgs.append(gathered_recon_img)
 
         y = y.to(opt.device)
