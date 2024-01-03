@@ -28,19 +28,19 @@ from .diffusion import Diffusion
 from ipdb import set_trace as debug
 
 
-def mom2norm(sqsums):
+def mom2norm(sqsums,MASK):
     #sqsums should have shape L,C,H,W
-    s=sqsums.shape
-    if len(s)!=4:
-        raise Exception('shape of sqsums likely not LHCW')
-    return torch.sum(torch.flatten(sqsums, start_dim=1, end_dim=-1),dim=-1)/np.prod(s[1:])
+    s=MASK.sum()
+    #if len(s)!=4:
+     #   raise Exception('shape of sqsums likely not LHCW')
+    return torch.sum(torch.flatten(sqsums*MASK[None,...], start_dim=1, end_dim=-1),dim=-1)/s
 
-def imagenorm(img):
-    s=img.shape
-    if len(s)==1: #fix for when img is single dimensional (batch_size,) -> (batch_size,1)
-        img=img[:,None]
-    n=torch.linalg.norm(torch.flatten(img, start_dim=1, end_dim=-1),dim=-1) #flattens non-batch dims and calculates norm
-    n/=np.sqrt(np.prod(s[1:]))
+def imagenorm(img,MASK):
+    s=MASK.sum()
+    #if len(s)==1: #fix for when img is single dimensional (batch_size,) -> (batch_size,1)
+      ##  img=img[:,None]
+    n=torch.linalg.norm(torch.flatten(img*MASK[None,...], start_dim=1, end_dim=-1),dim=-1) #flattens non-batch dims and calculates norm
+    n/=np.sqrt(s)
     return n
 
 def make_beta_schedule(n_timestep=1000, linear_start=1e-4, linear_end=2e-2):
@@ -80,19 +80,28 @@ class MLMCRunner(object):
         #MLMC params
         self.M=mlmcoptions.M
         self.Lmax=mlmcoptions.Lmax
-        self.Lmin=0#mlmcoptions.Lmin
+        self.Lmin=mlmcoptions.Lmin
         self.mlmc_batch_size=mlmcoptions.batch_size
         self.accsplit=mlmcoptions.accsplit
         self.N0=mlmcoptions.N0
         self.eval_dir=mlmcoptions.eval_dir
-    
+
+        print('Identity mask')
+        MASK=torch.ones((3,256,256))
+        if 'inpaint-center' in opt.corrupt:
+            print('inpainting mask')
+            MASK=torch.zeros((3,256,256))
+            MASK[:,64:192,64:192]=1.
+
+        self.mom2norm = lambda img : mom2norm(img,MASK)
+        self.imagenorm =lambda img : imagenorm(img,MASK)
         if mlmcoptions.payoff=='mean':
-            self.payoff=lambda x: torch.clip((x+1.)/2,0.,1.) #[-1,1]->[0,1]
+            self.payoff=lambda x: torch.clip(x,-1.,1.) #[-1,1]
         elif mlmcoptions.payoff=='secondmoment':
-            self.payoff=lambda x: torch.clip((x+1.)/2,0.,1.)**2 #[-1,1]->[0,1]
+            self.payoff=lambda x: torch.clip(x,-1.,1.)**2 #[-1,1]
         else:
             print('mlmcoptions payoff arg not recognised, Setting to mean payoff by default')
-            self.payoff=lambda x: torch.clip((x+1.)/2,0.,1.) #[-1,1]->[0,1]
+            self.payoff=lambda x: torch.clip(x,-1.,1.) #[-1,1]
         
         self.ema.store()
         self.ema.copy_to()
@@ -237,10 +246,10 @@ class MLMCRunner(object):
                 with open(os.path.join(this_sample_dir, "avgcost.pt"), "wb") as fout:
                     torch.save(torch.cat((torch.tensor([1]),(1+1./M)*M**torch.arange(1,Lmax+1))),fout)
             
-            means_dp=imagenorm(sums[:,0])/Nsamples
-            V_dp=mom2norm(sqsums[:,0])/Nsamples-means_dp**2  
-            means_p=imagenorm(sums[:,1])/Nsamples
-            V_p=mom2norm(sqsums[:,1])/Nsamples-means_p**2  
+            means_dp=self.imagenorm(sums[:,0])/Nsamples
+            V_dp=self.mom2norm(sqsums[:,0])/Nsamples-means_dp**2  
+            means_p=self.imagenorm(sums[:,1])/Nsamples
+            V_p=self.mom2norm(sqsums[:,1])/Nsamples-means_p**2  
             #Estimate orders of weak (alpha from means) and strong (beta from variance) convergence using LR
             Lmincond=V_dp[1:]<(np.sqrt(M)-1.)**2*V_p[-1]/(1+M) #index of optimal lmin
             cutoff=np.argmax(Lmincond[1:]*Lmincond[:-1])
@@ -263,21 +272,25 @@ class MLMCRunner(object):
                 f.write(f'Estimated alpha={alpha}. Estimated beta={beta}. Estimated Lmin={cutoff}.')
             with open(os.path.join(this_sample_dir, "alphabetagamma.pt"), "wb") as fout:
                 torch.save(torch.tensor([alpha,beta,cutoff]),fout)
-                
-        with open(os.path.join(this_sample_dir, "alphabetagamma.pt"),'rb') as f:
-            temp=torch.load(f)
-            alpha=temp[0].item()
-            beta=temp[1].item()
-            Lmin=int(temp[-1])
-        
+        try:          
+            with open(os.path.join(this_sample_dir, "alphabetagamma.pt"),'rb') as f:
+                temp=torch.load(f)
+                alpha=temp[0].item()
+                beta=temp[1].item()
+                Lmin=int(temp[-1])
+        except:
+            pass
+        alpha=.8
+        beta=1.45
+        print(alpha,beta,Lmin)
         #Do the calculations and simulations for num levels and complexity plot
         for i in range(len(acc)):
             e=acc[i]
             print(f'Performing mlmc for accuracy={e}')
             sums,sqsums,N=self.mlmc(e,Lmin,alpha_0=alpha,beta_0=beta,opt=opt, corrupt_img=corrupt_img, mask=mask, cond=cond) #sums=[dX,Xf,Xc], sqsums=[||dX||^2,||Xf||^2,||Xc||^2]
             L=len(N)-1+Lmin
-            means_p=imagenorm(sums[:,1])/N #Norm of mean of fine discretisations
-            V_p=torch.clip(mom2norm(sqsums[:,1])/N-means_p**2,min=0)
+            means_p=self.imagenorm(sums[:,1])/N #Norm of mean of fine discretisations
+            V_p=torch.clip(self.mom2norm(sqsums[:,1])/N-means_p**2,min=0)
 
             #cost
             cost_mlmc=torch.sum(N*(M**np.arange(Lmin,L+1)+np.hstack((0,M**np.arange(Lmin,L))))) #cost is number of NFE
@@ -288,21 +301,23 @@ class MLMCRunner(object):
             dividerN=N.clone() #add axes to N to broadcast correctly on division
             for i in range(len(sums.shape[1:])):
                 dividerN.unsqueeze_(-1)
-            this_sample_dir = os.path.join(eval_dir, f"M_{M}_accuracy_{e}")
-            
+            this_sample_dir = os.path.join(eval_dir, 'Experiment',f"M_{M}_accuracy_{e}")
+            if not os.path.exists(os.path.join(eval_dir, 'Experiment')):
+                os.mkdir(os.path.join(eval_dir, 'Experiment'))
+                
             if not os.path.exists(this_sample_dir):
                 os.mkdir(this_sample_dir)        
             with open(os.path.join(this_sample_dir, "averages.pt"), "wb") as fout:
                 torch.save(sums/dividerN,fout)
             with open(os.path.join(this_sample_dir, "sqaverages.pt"), "wb") as fout:
-                torch.save(sqsums/dividerN,fout) #sums has shape (L,4,C,H,W) if img (L,4,2048) if activations
+                torch.save(sqsums/dividerN,fout) #sums has shape (L,4,C,H,W)
             with open(os.path.join(this_sample_dir, "N.pt"), "wb") as fout:
                 torch.save(N,fout)
             with open(os.path.join(this_sample_dir, "costs.npz"), "wb") as fout:
                np.savez_compressed(fout,costmlmc=np.array(cost_mlmc),costmc=np.array(cost_mc))
 
             meanimg=torch.sum(sums[:,0]/dividerN[:,0,...],axis=0)#cut off one dummy axis
-            meanimg=torch.clip(meanimg,0.,1.).permute(1,2,0).cpu().numpy
+            meanimg=torch.clip(.5*meanimg+.5,0.,1.).permute(1,2,0).cpu().numpy()
             # Write samples to disk or Google Cloud Storage
             with open(os.path.join(this_sample_dir, "meanpayoff.npz"), "wb") as fout:
                 np.savez_compressed(fout, meanpayoff=meanimg)
@@ -317,7 +332,7 @@ class MLMCRunner(object):
         M=self.M
         N0=self.N0
         Lmax=self.Lmax
-        L=Lmin+1
+        L=Lmin+2
 
         mylen=L+1-Lmin
         V=torch.zeros(mylen) #Initialise variance vector of each levels' variance
@@ -339,9 +354,8 @@ class MLMCRunner(object):
                     sums[i,...]+=tempsums
                     
             N+=dN #Increment samples taken counter for each level
-            Yl=imagenorm(sums[:,0])/N
-            V=torch.clip(mom2norm(sqsums[:,0])/N-(Yl)**2,min=0) #Calculate variance based on updated samples
-            
+            Yl=self.imagenorm(sums[:,0])/N
+            V=torch.clip(self.mom2norm(sqsums[:,0])/N-(Yl)**2,min=0) #Calculate variance based on updated samples
             ##Fix to deal with zero variance or mean by linear extrapolation
             Yl[2:]=torch.maximum(Yl[2:],.5*Yl[1:-1]*M**(-alpha))
             V[2:]=torch.maximum(V[2:],.5*V[1:-1]*M**(-beta))
@@ -361,11 +375,12 @@ class MLMCRunner(object):
                 beta=beta_
                 
             sqrt_V=torch.sqrt(V)
-            Nl_new=torch.ceil(((accsplit*accuracy)**-2)*torch.sum(sqrt_V*sqrt_cost)*(sqrt_V/sqrt_cost)) #Estimate optimal number of samples/level
+            Nl_new=torch.ceil(2*((accuracy)**-2)*torch.sum(sqrt_V*sqrt_cost)*(sqrt_V/sqrt_cost)) #Estimate optimal number of samples/level
             dN=torch.clip(Nl_new-N,min=0) #Number of additional samples
             print(f'Asking for {dN} new samples for l=[{Lmin,L}]')
+            print(f'sqrt_variance={(2*V/N).sum().sqrt()}, bias={np.sqrt(2)*Yl[-1]/(M**alpha-1.)}.')
             if torch.sum(dN > 0.01*N).item() == 0: #Almost converged
-                if max(Yl[-2]/(M**alpha),Yl[-1])>(M**alpha-1)*accuracy*np.sqrt(1-accsplit**2):
+                if max(Yl[-2]/(M**alpha),Yl[-1])>(M**alpha-1)*accuracy*np.sqrt(.5):
                     L+=1
                     print(f'Increased L to {L}')
                     if (L>Lmax):

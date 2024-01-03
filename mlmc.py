@@ -99,9 +99,10 @@ def main(opt):
     valdataset= build_dataset(opt, log, corrupt_type)
     
     # build runner
-    sample_dir = RESULT_DIR / opt.ckpt / "{}{}".format(
-        datetime.datetime.now().strftime('%y%m%d_%H%M%S'),"_clip" if opt.clip_denoise else ""
-    )
+    imgnum=0
+    sample_dir = RESULT_DIR / opt.ckpt / "_{}".format(imgnum)
+    if opt.savedir is not None:
+        sample_dir=opt.savedir
     os.makedirs(sample_dir, exist_ok=True)
     mlmcoptions=edict(M=opt.M,N0=opt.N0,Lmin=opt.Lmin,Lmax=opt.Lmax,payoff=opt.payoff,
                       accsplit=opt.accsplit,eval_dir=sample_dir,acc=opt.acc,batch_size=opt.batch_size)
@@ -120,21 +121,22 @@ def main(opt):
     )
     
     for it,out in enumerate(val_loader):
-        corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
+        if it==imgnum:
+            corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
         
-        y = y.to(opt.device)
+            y = y.to(opt.device)
 
-        tu.save_image((out[0]+1)/2, os.path.join(mlmcoptions.eval_dir,"clean.png"))
-        tu.save_image((corrupt_img+1)/2, os.path.join(mlmcoptions.eval_dir,"corrupt.png"))
-        tu.save_image((x1+1)/2, os.path.join(mlmcoptions.eval_dir,"x1.png"))
-        with open(os.path.join(mlmcoptions.eval_dir, "label.pt"), "wb") as fout:
-            torch.save(y,fout)
-        with open(os.path.join(mlmcoptions.eval_dir, "mask.pt"), "wb") as fout:
-            torch.save(mask,fout)
+            tu.save_image((out[0]+1)/2, os.path.join(mlmcoptions.eval_dir,"clean.png"))
+            tu.save_image((corrupt_img+1)/2, os.path.join(mlmcoptions.eval_dir,"corrupt.png"))
+            tu.save_image((x1+1)/2, os.path.join(mlmcoptions.eval_dir,"x1.png"))
+            with open(os.path.join(mlmcoptions.eval_dir, "label.pt"), "wb") as fout:
+                torch.save(y,fout)
+            with open(os.path.join(mlmcoptions.eval_dir, "mask.pt"), "wb") as fout:
+                torch.save(mask,fout)
 
         #corrupt_img, x1, mask, cond, y=corrupt_img[0], x1[0], mask[0], cond[0], y[0]
-        runner.Giles_plot(opt.acc,ckpt_opt, corrupt_img.to('cpu'), mask=mask, cond=cond)
-        if it==0:
+            runner.Giles_plot(opt.acc,ckpt_opt, corrupt_img.to('cpu'), mask=mask, cond=cond)
+        if it==imgnum:
             break
     del runner
 if __name__ == '__main__':
@@ -158,12 +160,12 @@ if __name__ == '__main__':
     #mlmc
     parser.add_argument("--M",     type=int,  default=2)
     parser.add_argument("--N0",           type=str,  default=100,        help="initial MLMC samples")
-    parser.add_argument("--Lmin",   type=int, default=4,          help="minimum level")
+    parser.add_argument("--Lmin",   type=int, default=3,          help="minimum level")
     parser.add_argument("--Lmax",       type=int, default=8,          help="maximum level")
     parser.add_argument("--accsplit",       type=float, default=np.sqrt(.5),          help="bias-variance splitting")
-    parser.add_argument("--acc",       type=list, default=[.1],          help="accuracies for MLMC")
+    parser.add_argument("--acc",       type=float, nargs='+', help="accuracies for MLMC")
     parser.add_argument("--payoff",       type=str, default='mean',          help="payoff for MLMC")
-
+    parser.add_argument("--savedir",       type=str, default=None,          help="use existing file")
     arg = parser.parse_args()
    
     opt = edict(
