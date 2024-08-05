@@ -97,7 +97,7 @@ class MLMCRunner(object):
         self.imagenorm =lambda img : imagenorm(img,MASK)
         if mlmcoptions.payoff=='mean':
             self.payoff=lambda x: torch.clip(x,-1.,1.) #[-1,1]
-        elif mlmcoptions.payoff=='secondmoment':
+        elif mlmcoptions.payoff=='second_moment':
             self.payoff=lambda x: torch.clip(x,-1.,1.)**2 #[-1,1]
         else:
             print('mlmcoptions payoff arg not recognised, Setting to mean payoff by default')
@@ -218,7 +218,7 @@ class MLMCRunner(object):
         N0=self.N0
         Lmax=self.Lmax
         eval_dir = self.eval_dir
-        Nsamples=100
+        Nsamples=1000
         Lmin=self.Lmin
         
         # Directory to save means and norms                                                                                               
@@ -233,7 +233,7 @@ class MLMCRunner(object):
             sqsums=torch.zeros((Lmax+1,*sqsums.shape[1:]))
             os.mkdir(this_sample_dir)
             print(f'Proceeding to calculate variance and means with {Nsamples} estimator samples')
-            for i,l in enumerate(range(Lmax+1)):
+            for i,l in enumerate(range(Lmin,Lmax+1)):
                 print(f'l={l}')
                 sums[i],sqsums[i] = self.mlmclooper(Nsamples, l ,M, opt, corrupt_img, mask, cond, clip_denoise=opt.clip_denoise, log_count=0, verbose=False)
             
@@ -251,7 +251,7 @@ class MLMCRunner(object):
             means_p=self.imagenorm(sums[:,1])/Nsamples
             V_p=self.mom2norm(sqsums[:,1])/Nsamples-means_p**2  
             #Estimate orders of weak (alpha from means) and strong (beta from variance) convergence using LR
-            Lmincond=V_dp[1:]<(np.sqrt(M)-1.)**2*V_p[-1]/(1+M) #index of optimal lmin
+            Lmincond=V_dp[1:]<(np.sqrt(M)-1.)**2*V_p[1:]/(1+M) #index of optimal lmin
             cutoff=np.argmax(Lmincond[1:]*Lmincond[:-1])
             means_p=means_p[cutoff:]
             V_p=V_p[cutoff:]
@@ -280,8 +280,6 @@ class MLMCRunner(object):
                 Lmin=int(temp[-1])
         except:
             pass
-        alpha=.8
-        beta=1.45
         print(alpha,beta,Lmin)
         #Do the calculations and simulations for num levels and complexity plot
         for i in range(len(acc)):
@@ -332,7 +330,7 @@ class MLMCRunner(object):
         M=self.M
         N0=self.N0
         Lmax=self.Lmax
-        L=Lmin+2
+        L=Lmin+1
 
         mylen=L+1-Lmin
         V=torch.zeros(mylen) #Initialise variance vector of each levels' variance
@@ -354,11 +352,18 @@ class MLMCRunner(object):
                     sums[i,...]+=tempsums
                     
             N+=dN #Increment samples taken counter for each level
-            Yl=self.imagenorm(sums[:,0])/N
-            V=torch.clip(self.mom2norm(sqsums[:,0])/N-(Yl)**2,min=0) #Calculate variance based on updated samples
-            ##Fix to deal with zero variance or mean by linear extrapolation
-            Yl[2:]=torch.maximum(Yl[2:],.5*Yl[1:-1]*M**(-alpha))
-            V[2:]=torch.maximum(V[2:],.5*V[1:-1]*M**(-beta))
+            Yl=(self.imagenorm(sums[:,0])/N).to(torch.float32)
+            cf=1
+            while True:
+                V=torch.clip(self.mom2norm(sqsums[:,0])/N-(Yl)**2,min=0.).to(torch.float32) #Calculate variance based on updated samples                                
+                ##Fix to deal with zero variance or mean by linear extrapolation                                                                                         
+                V[2:]=torch.maximum(V[2:],.5*V[1:-1]*M**(-beta))
+                cf_=torch.sqrt((1+V/(N*Yl**2)))
+                Y_corrected=(self.imagenorm(sums[:,0])/N).to(torch.float32)/cf_ #correct for bias                                                                        
+                Yl=Y_corrected
+                if torch.max(cf_-cf)<.01:
+                    break
+                cf=cf_
             
             #Estimate order of weak convergence using LR
             #Yl=(M^alpha-1)khl^alpha=(M^alpha-1)k(TM^-l)^alpha=((M^alpha-1)kT^alpha)M^(-l*alpha)
@@ -378,9 +383,10 @@ class MLMCRunner(object):
             Nl_new=torch.ceil(2*((accuracy)**-2)*torch.sum(sqrt_V*sqrt_cost)*(sqrt_V/sqrt_cost)) #Estimate optimal number of samples/level
             dN=torch.clip(Nl_new-N,min=0) #Number of additional samples
             print(f'Asking for {dN} new samples for l=[{Lmin,L}]')
-            print(f'sqrt_variance={(2*V/N).sum().sqrt()}, bias={np.sqrt(2)*Yl[-1]/(M**alpha-1.)}.')
             if torch.sum(dN > 0.01*N).item() == 0: #Almost converged
-                if max(Yl[-2]/(M**alpha),Yl[-1])>(M**alpha-1)*accuracy*np.sqrt(.5):
+                test=max(Yl[-2]/(M**alpha),Yl[-1]) if L-Lmin>1 else Yl[-1]
+                print(f'sqrt_variance={(2*V/N).sum().sqrt()}, bias={np.sqrt(2)*test/(M**alpha-1.)}.')
+                if test>(M**alpha-1)*accuracy*np.sqrt(.5): 
                     L+=1
                     print(f'Increased L to {L}')
                     if (L>Lmax):
