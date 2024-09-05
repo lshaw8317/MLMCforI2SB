@@ -2,7 +2,7 @@
 Code for "Accelerating Bayesian
 computation with deep
 generative samplers by
-Multilevel Monte Carlo" Haji-Ali et. al. (2024) adapted from 
+Multilevel Monte Carlo" Haji-Ali et. al. (2024) adapted from https://github.com/NVlabs/I2SB associated to 
 ## Citation
 
 ```
