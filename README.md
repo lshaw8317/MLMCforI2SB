@@ -20,3 +20,8 @@ Copyright © 2023, NVIDIA Corporation. All rights reserved.
 This work is made available under the Nvidia Source Code License-NC.
 
 The model checkpoints are shared under [CC-BY-NC-SA-4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode). If you remix, transform, or build upon the material, you must distribute your contributions under the same license as the original.
+
+Run e.g.
+```
+python mlmc.py --dataset-dir datasetdir --ckpt inpaint-center --batch-size 12 
+```
